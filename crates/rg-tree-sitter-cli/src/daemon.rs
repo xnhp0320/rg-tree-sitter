@@ -65,7 +65,7 @@ pub async fn run_daemon(
 async fn handle_client(
     stream: UnixStream,
     engine: Arc<SearchEngine>,
-    _project_dir: PathBuf,
+    project_dir: PathBuf,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
@@ -75,7 +75,7 @@ async fn handle_client(
     let req: QueryRequest = serde_json::from_str(&line)?;
     let resp = match req.command.as_str() {
         "define" => {
-            match engine.find_definitions(&req.symbol, &req.dir, req.lang) {
+            match engine.find_definitions(&req.symbol, &project_dir, req.lang) {
                 Ok(matches) => QueryResponse { matches, cache_size: None, watch_enabled: None },
                 Err(e) => {
                     eprintln!("Query error: {}", e);
@@ -84,7 +84,7 @@ async fn handle_client(
             }
         }
         "refs" => {
-            match engine.find_references(&req.symbol, &req.dir, req.lang) {
+            match engine.find_references(&req.symbol, &project_dir, req.lang) {
                 Ok(matches) => QueryResponse { matches, cache_size: None, watch_enabled: None },
                 Err(e) => {
                     eprintln!("Query error: {}", e);
