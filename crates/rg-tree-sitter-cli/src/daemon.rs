@@ -36,7 +36,7 @@ pub async fn run_daemon(
     println!("Daemon listening on {}", socket_path.display());
     println!("Project directory: {}", dir.display());
 
-    let engine = Arc::new(SearchEngine::new(128).with_watch(watch));
+    let engine = Arc::new(SearchEngine::new(2048).with_watch(watch));
     let project_dir = dir.to_path_buf();
 
     // Start file watcher if requested

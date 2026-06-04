@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-/// Simple LRU-like cache for parsed ASTs.
+/// Simple LRU cache for parsed ASTs, backed by the `lru` crate.
 pub struct AstCache {
-    inner: Mutex<CacheInner>,
-    capacity: usize,
+    inner: Mutex<lru::LruCache<PathBuf, CacheEntry>>,
 }
 
 struct CacheEntry {
@@ -14,43 +12,30 @@ struct CacheEntry {
     mtime: std::time::SystemTime,
 }
 
-struct CacheInner {
-    data: HashMap<PathBuf, CacheEntry>,
-    order: Vec<PathBuf>, // Most recently used at the end
-}
-
 impl AstCache {
     pub fn new(capacity: usize) -> Self {
         Self {
-            inner: Mutex::new(CacheInner {
-                data: HashMap::new(),
-                order: Vec::new(),
-            }),
-            capacity,
+            inner: Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(capacity).unwrap_or(
+                    std::num::NonZeroUsize::new(1).unwrap(),
+                ),
+            )),
         }
     }
 
     pub fn get(&self, path: &Path) -> Option<(tree_sitter::Tree, String)> {
         let mut inner = self.inner.lock().unwrap();
-        let entry = inner.data.get(path)?;
+        let entry = inner.get(path)?;
 
         // Check mtime
         let current_mtime = std::fs::metadata(path).ok()?.modified().ok()?;
         if current_mtime != entry.mtime {
+            // Stale entry — remove it
+            inner.pop(path);
             return None;
         }
 
-        // Clone data first before modifying order
-        let tree = entry.tree.clone();
-        let source = entry.source.clone();
-
-        // Move to end (most recently used)
-        if let Some(pos) = inner.order.iter().position(|p| p == path) {
-            let p = inner.order.remove(pos);
-            inner.order.push(p);
-        }
-
-        Some((tree, source))
+        Some((entry.tree.clone(), entry.source.clone()))
     }
 
     pub fn insert(&self, path: PathBuf, tree: tree_sitter::Tree, source: String) {
@@ -60,23 +45,7 @@ impl AstCache {
             .and_then(|m| m.modified())
             .unwrap_or_else(|_| std::time::SystemTime::now());
 
-        // Remove old entry if exists
-        if inner.data.contains_key(&path) {
-            inner.order.retain(|p| p != &path);
-        }
-
-        // Evict if over capacity
-        while inner.order.len() >= self.capacity {
-            if let Some(old) = inner.order.first().cloned() {
-                inner.order.remove(0);
-                inner.data.remove(&old);
-            } else {
-                break;
-            }
-        }
-
-        inner.order.push(path.clone());
-        inner.data.insert(
+        inner.put(
             path,
             CacheEntry {
                 tree,
@@ -88,23 +57,21 @@ impl AstCache {
 
     pub fn remove(&self, path: &Path) {
         let mut inner = self.inner.lock().unwrap();
-        inner.order.retain(|p| p != path);
-        inner.data.remove(path);
+        inner.pop(path);
     }
 
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
-        inner.data.clear();
-        inner.order.clear();
+        inner.clear();
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().order.len()
+        self.inner.lock().unwrap().len()
     }
 }
 
 /// Shared cache reference for use across async boundaries.
-pub type SharedAstCache = Arc<AstCache>;
+pub type SharedAstCache = std::sync::Arc<AstCache>;
 
 #[cfg(test)]
 mod tests {
