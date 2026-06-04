@@ -1,6 +1,6 @@
 # rg-tree-sitter 改进点检查清单
 
-> 对照 IMPROVEMENTS.md 与 phrase.md 逐项核对，标注完成状态。
+> 对照 IMPROVEMENTS.md、phrase.md 和 PERFORMANCE.md 逐项核对。
 
 ---
 
@@ -17,18 +17,23 @@
 | 5 | **P2: inotify 目录过滤** — 跳过 `.git/`、`target/` 等 | `daemon.rs:should_ignore_watcher_event()` | 手动验证 |
 | 6 | **mark_dirty 闭环** — dirty 时主动从缓存驱逐 | `engine.rs:mark_dirty()` + `cache.rs:remove()` | `test_cache_mtime_check` 覆盖 |
 | 7 | **搜索 AST 预过滤** — `quick_filter()` 在 parse 前过滤 | `lib.rs`、`engine.rs` | 集成在 `find_definitions` 链路中 |
+| 8 | **B: CLI `--socket` fallback** — daemon 未启动时自动回退本地模式 | `cli.rs` | 手动验证（非存在 socket） |
+| 9 | **A: `daemon-status` 真实状态** — 返回缓存大小、watcher 状态 | `daemon.rs` | 手动验证 |
+| 10 | **F: watcher debounce** — 100ms 批量 flush | `daemon.rs:run_watcher()` | 代码审查 |
+| 11 | **AstCache LRU 性能修复** — 用 `lru` crate 替代手写 O(n) | `cache.rs` | kernel 测试 warm 4.5x 加速 |
+| 12 | **Daemon 默认缓存 2048** — 从 128 提升 | `daemon.rs` | kernel 测试验证 |
 
 ### 基础功能
 
 | # | 改进点 | 状态 |
 |---|--------|------|
-| 8 | **MVP CLI 模式** — define/refs/filter | ✅ 已完成 |
-| 9 | **MVP Daemon 模式** — Unix socket + LRU 缓存 | ✅ 已完成 |
-| 10 | **17 个单元测试** — languages/searcher/filter/cache | ✅ 已完成 |
-| 11 | **5 个新增测试** — prefilter + parallel parse | ✅ 已完成 |
-| 12 | **C/C++/Python 语言支持** | ✅ 已完成 |
-| 13 | **多行定义修正** — `function_definition` 起始行回溯 | ✅ 已完成 |
-| 14 | **调用/定义语义分类** — 祖先链遍历 | ✅ 已完成 |
+| 13 | **MVP CLI 模式** — define/refs/filter | ✅ 已完成 |
+| 14 | **MVP Daemon 模式** — Unix socket + LRU 缓存 | ✅ 已完成 |
+| 15 | **22 个单元测试** — languages/searcher/filter/cache/prefilter | ✅ 已完成 |
+| 16 | **C/C++/Python 语言支持** | ✅ 已完成 |
+| 17 | **多行定义修正** — `function_definition` 起始行回溯 | ✅ 已完成 |
+| 18 | **调用/定义语义分类** — 祖先链遍历 | ✅ 已完成 |
+| 19 | **Linux kernel 性能测试** — PERFORMANCE.md | ✅ 已完成 |
 
 ---
 
@@ -36,24 +41,27 @@
 
 | # | 改进点 | 影响 | 优先级 |
 |---|--------|------|--------|
-| A | **`daemon-status` 返回实际状态** | 目前返回空 `matches`，应返回缓存大小、监听目录、watcher 状态 | 中 |
-| B | **CLI `--socket` 自动 fallback 本地模式** | daemon 未启动时直接报错 `Connection refused`，应静默 fallback 到 CLI | 高 |
 | C | **`filter` IPC 重构** | 当前 stdin 全文塞进 `symbol` 字段，应设计 `FilterRequest` 结构 | 低 |
 | D | **扩展更多语言** — Rust、Go、TypeScript、Java | 只需在 `languages.rs` 加映射和节点类型表 | 低 |
 | E | **Vim plugin 目录** — `plugin/` + `autoload/` 开箱即用 | 文档已有示例代码，需落盘到实际文件 | 低 |
-| F | **事件 debounce** — 文件保存时编辑器可能连续触发多次 watcher 事件 | 当前每事件都处理，应批量 flush | 中 |
-| G | **大项目 watcher 降级** — 当 `fs.inotify.max_user_watches` 不足时自动降级 | 当前递归 watch 全目录，可能触及上限 | 低 |
+| G | **大项目 watcher 降级** — 当 `fs.inotify.max_user_watches` 不足时自动降级 | kernel 源码下 daemon + watch 可能崩溃 | 中 |
+| H | **L3 tree-sitter query 初筛** — parse 前用 query 跳过无定义的文件 | 对 `printk`/`memcpy` 等高频 symbol 可跳过 90% 文件 | 高 |
+| I | **限制搜索范围** — define 优先搜 .h 和核心目录 | 减少 `search_symbol` 遍历文件数 | 中 |
+
+---
+
+## 性能瓶颈记录（见 PERFORMANCE.md）
+
+| 瓶颈 | 耗时 | 占比 | 解决方案 |
+|------|------|------|---------|
+| `search_symbol`（遍历 58K 文件） | ~350ms | 20% | 限制搜索范围（I） |
+| `parse_batch` cold（parse 1,226 文件） | ~1,050ms | **60%** | L3 query 初筛（H）+ 增大缓存 |
+| `parse_batch` warm（LRU 命中） | ~36ms | 2% | 已优化（`lru` crate O(1)） |
+| `filter` 循环（AST 分类） | ~0ms | <1% | 无需优化 |
 
 ---
 
 ## 总计
 
-- **已完成：14 项**
-- **未完成：7 项**
-
-### 建议下一步
-
-按影响/代码量比排序：
-1. **B（fallback）** — 约 10 行代码，解决 daemon 未启动时的用户体验问题
-2. **A（daemon-status）** — 约 20 行代码，提升 daemon 可观测性
-3. **F（debounce）** — 约 30 行代码，减少文件保存时的重复 parse
+- **已完成：19 项**
+- **未完成：6 项**
