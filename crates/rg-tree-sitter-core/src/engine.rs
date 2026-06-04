@@ -14,6 +14,7 @@ use std::sync::Mutex;
 pub struct SearchEngine {
     cache: Arc<AstCache>,
     dirty_files: Mutex<HashSet<PathBuf>>,
+    watch_enabled: bool,
 }
 
 impl SearchEngine {
@@ -21,7 +22,17 @@ impl SearchEngine {
         Self {
             cache: Arc::new(AstCache::new(cache_capacity)),
             dirty_files: Mutex::new(HashSet::new()),
+            watch_enabled: false,
         }
+    }
+
+    pub fn with_watch(mut self, enabled: bool) -> Self {
+        self.watch_enabled = enabled;
+        self
+    }
+
+    pub fn watch_enabled(&self) -> bool {
+        self.watch_enabled
     }
 
     pub fn cache(&self) -> Arc<AstCache> {

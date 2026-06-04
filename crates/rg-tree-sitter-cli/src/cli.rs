@@ -36,9 +36,15 @@ pub struct SearchArgs {
 
 pub fn run_define(args: &SearchArgs) -> anyhow::Result<()> {
     if let Some(socket) = &args.socket {
-        let matches = query_daemon(socket, "define", &args.symbol, &args.dir, args.lang.as_deref())?;
-        print_matches(&matches, args.format);
-        return Ok(());
+        match query_daemon(socket, "define", &args.symbol, &args.dir, args.lang.as_deref()) {
+            Ok(matches) => {
+                print_matches(&matches, args.format);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Warning: daemon unavailable ({}), falling back to local search", e);
+            }
+        }
     }
     let lang = resolve_lang(args.lang.as_deref(), &args.dir)?;
     let matches = find_definitions(&args.symbol, &args.dir, lang)?;
@@ -48,9 +54,15 @@ pub fn run_define(args: &SearchArgs) -> anyhow::Result<()> {
 
 pub fn run_refs(args: &SearchArgs) -> anyhow::Result<()> {
     if let Some(socket) = &args.socket {
-        let matches = query_daemon(socket, "refs", &args.symbol, &args.dir, args.lang.as_deref())?;
-        print_matches(&matches, args.format);
-        return Ok(());
+        match query_daemon(socket, "refs", &args.symbol, &args.dir, args.lang.as_deref()) {
+            Ok(matches) => {
+                print_matches(&matches, args.format);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Warning: daemon unavailable ({}), falling back to local search", e);
+            }
+        }
     }
     let lang = resolve_lang(args.lang.as_deref(), &args.dir)?;
     let matches = find_references(&args.symbol, &args.dir, lang)?;
@@ -66,9 +78,15 @@ pub fn run_filter(lang_str: &str, format: OutputFormat, socket: Option<&PathBuf>
     io::stdin().read_to_string(&mut input)?;
 
     if let Some(socket) = socket {
-        let matches = filter_via_daemon(socket, lang, input.as_bytes())?;
-        print_matches(&matches, format);
-        return Ok(());
+        match filter_via_daemon(socket, lang, input.as_bytes()) {
+            Ok(matches) => {
+                print_matches(&matches, format);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Warning: daemon unavailable ({}), falling back to local filter", e);
+            }
+        }
     }
 
     let matches = filter_definitions_from_input(input.as_bytes(), lang)?;

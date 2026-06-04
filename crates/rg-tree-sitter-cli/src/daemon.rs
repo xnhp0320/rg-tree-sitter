@@ -18,6 +18,10 @@ pub struct QueryRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub matches: Vec<SemanticMatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watch_enabled: Option<bool>,
 }
 
 pub async fn run_daemon(
@@ -32,7 +36,7 @@ pub async fn run_daemon(
     println!("Daemon listening on {}", socket_path.display());
     println!("Project directory: {}", dir.display());
 
-    let engine = Arc::new(SearchEngine::new(128));
+    let engine = Arc::new(SearchEngine::new(128).with_watch(watch));
     let project_dir = dir.to_path_buf();
 
     // Start file watcher if requested
@@ -69,25 +73,56 @@ async fn handle_client(
     buf_reader.read_line(&mut line).await?;
 
     let req: QueryRequest = serde_json::from_str(&line)?;
-    let result = match req.command.as_str() {
-        "define" => engine.find_definitions(&req.symbol, &req.dir, req.lang),
-        "refs" => engine.find_references(&req.symbol, &req.dir, req.lang),
+    let resp = match req.command.as_str() {
+        "define" => {
+            match engine.find_definitions(&req.symbol, &req.dir, req.lang) {
+                Ok(matches) => QueryResponse { matches, cache_size: None, watch_enabled: None },
+                Err(e) => {
+                    eprintln!("Query error: {}", e);
+                    QueryResponse { matches: vec![], cache_size: None, watch_enabled: None }
+                }
+            }
+        }
+        "refs" => {
+            match engine.find_references(&req.symbol, &req.dir, req.lang) {
+                Ok(matches) => QueryResponse { matches, cache_size: None, watch_enabled: None },
+                Err(e) => {
+                    eprintln!("Query error: {}", e);
+                    QueryResponse { matches: vec![], cache_size: None, watch_enabled: None }
+                }
+            }
+        }
         "filter" => {
-            // For filter command, symbol field contains the raw rg output
             use std::io::Cursor;
             let input = Cursor::new(req.symbol);
-            let matches = rg_tree_sitter_core::parse_external_matches(input)?;
-            let mut filter = rg_tree_sitter_core::AstFilter::new_with_cache(req.lang, Some(engine.cache()))?;
-            Ok(filter.filter_definitions(&matches))
+            let matches = match rg_tree_sitter_core::parse_external_matches(input) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Parse error: {}", e);
+                    vec![]
+                }
+            };
+            let mut filter = match rg_tree_sitter_core::AstFilter::new_with_cache(req.lang, Some(engine.cache())) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Filter init error: {}", e);
+                    return Ok(());
+                }
+            };
+            QueryResponse {
+                matches: filter.filter_definitions(&matches),
+                cache_size: None,
+                watch_enabled: None,
+            }
         }
-        _ => Err(anyhow::anyhow!("unknown command: {}", req.command)),
-    };
-
-    let resp = match result {
-        Ok(matches) => QueryResponse { matches },
-        Err(e) => {
-            eprintln!("Query error: {}", e);
-            QueryResponse { matches: vec![] }
+        "status" => QueryResponse {
+            matches: vec![],
+            cache_size: Some(engine.cache_len()),
+            watch_enabled: Some(engine.watch_enabled()),
+        },
+        _ => {
+            eprintln!("Unknown command: {}", req.command);
+            QueryResponse { matches: vec![], cache_size: None, watch_enabled: None }
         }
     };
 
@@ -100,7 +135,9 @@ async fn handle_client(
 
 fn run_watcher(dir: &std::path::Path, engine: Arc<SearchEngine>) -> anyhow::Result<()> {
     use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::collections::HashSet;
     use std::sync::mpsc::channel;
+    use std::time::Duration;
 
     let (tx, rx) = channel::<Result<Event, notify::Error>>();
     let mut watcher: RecommendedWatcher = Watcher::new(
@@ -112,21 +149,32 @@ fn run_watcher(dir: &std::path::Path, engine: Arc<SearchEngine>) -> anyhow::Resu
 
     watcher.watch(dir, RecursiveMode::Recursive)?;
 
+    let mut pending: HashSet<PathBuf> = HashSet::new();
+    let debounce = Duration::from_millis(100);
+
     loop {
-        match rx.recv() {
+        match rx.recv_timeout(debounce) {
             Ok(Ok(event)) => {
                 for path in event.paths {
                     if should_ignore_watcher_event(&path) {
                         continue;
                     }
-                    engine.mark_dirty(path);
+                    pending.insert(path);
                 }
             }
             Ok(Err(e)) => {
                 eprintln!("Watch error: {}", e);
             }
-            Err(e) => {
-                eprintln!("Watch channel error: {}", e);
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Flush pending paths after debounce interval
+                if !pending.is_empty() {
+                    for path in pending.drain() {
+                        engine.mark_dirty(path);
+                    }
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("Watch channel disconnected");
                 break;
             }
         }
@@ -180,7 +228,16 @@ pub fn run_daemon_status(socket_path: &std::path::Path) -> anyhow::Result<()> {
 
     let reader = std::io::BufReader::new(&stream);
     let resp_line = reader.lines().next().transpose()?.unwrap_or_default();
-    println!("Daemon response: {}", resp_line);
+    let resp: QueryResponse = serde_json::from_str(&resp_line)?;
+
+    println!("rg-tree-sitter daemon status");
+    println!("----------------------------");
+    if let Some(size) = resp.cache_size {
+        println!("Cache entries: {}", size);
+    }
+    if let Some(watch) = resp.watch_enabled {
+        println!("File watcher: {}", if watch { "enabled" } else { "disabled" });
+    }
     Ok(())
 }
 
