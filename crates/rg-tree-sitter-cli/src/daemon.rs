@@ -116,6 +116,9 @@ fn run_watcher(dir: &std::path::Path, engine: Arc<SearchEngine>) -> anyhow::Resu
         match rx.recv() {
             Ok(Ok(event)) => {
                 for path in event.paths {
+                    if should_ignore_watcher_event(&path) {
+                        continue;
+                    }
                     engine.mark_dirty(path);
                 }
             }
@@ -130,6 +133,33 @@ fn run_watcher(dir: &std::path::Path, engine: Arc<SearchEngine>) -> anyhow::Resu
     }
 
     Ok(())
+}
+
+/// Filter out irrelevant watcher events.
+fn should_ignore_watcher_event(path: &std::path::Path) -> bool {
+    // Ignore directories
+    if path.is_dir() {
+        return true;
+    }
+
+    // Ignore common non-source directories
+    let path_str = path.to_string_lossy();
+    for ignored in &["/.", "/target/", "/node_modules/", "/build/", "/dist/", "/.git/"] {
+        if path_str.contains(ignored) {
+            return true;
+        }
+    }
+
+    // Only care about source file extensions
+    let is_source = matches!(
+        path.extension().and_then(|s| s.to_str()),
+        Some("c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "py" | "rs" | "go" | "js" | "ts" | "java")
+    );
+    if !is_source {
+        return true;
+    }
+
+    false
 }
 
 pub fn run_daemon_status(socket_path: &std::path::Path) -> anyhow::Result<()> {

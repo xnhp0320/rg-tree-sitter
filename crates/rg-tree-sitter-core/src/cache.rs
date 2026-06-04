@@ -86,6 +86,12 @@ impl AstCache {
         );
     }
 
+    pub fn remove(&self, path: &Path) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.order.retain(|p| p != path);
+        inner.data.remove(path);
+    }
+
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.data.clear();

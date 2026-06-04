@@ -1,6 +1,7 @@
 use crate::cache::AstCache;
 use crate::languages::{LanguageId, LanguageRules, SymbolKind};
 use crate::searcher::TextMatch;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -65,6 +66,9 @@ impl AstFilter {
     }
 
     fn filter(&mut self, matches: &[TextMatch], target_kind: SymbolKind) -> Vec<SemanticMatch> {
+        // P1: parallel parse all uncached files before semantic classification
+        self.parse_batch(matches);
+
         let mut result = Vec::new();
         let rules = self.rules; // Copy rules out to avoid borrow issues
 
@@ -116,6 +120,59 @@ impl AstFilter {
         result
     }
 
+    /// P1: Parallel parse all uncached unique files referenced by matches.
+    fn parse_batch(&mut self, matches: &[TextMatch]) {
+        // Collect unique paths that are not yet cached
+        let mut uncached_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for m in matches {
+            if !seen.insert(&m.path) {
+                continue;
+            }
+            if self.local_cache.contains_key(&m.path) {
+                continue;
+            }
+            if let Some(ref shared) = self.shared_cache {
+                if shared.get(&m.path).is_some() {
+                    continue;
+                }
+            }
+            uncached_paths.push(m.path.clone());
+        }
+
+        if uncached_paths.is_empty() {
+            return;
+        }
+
+        let lang = self.lang;
+        let shared = self.shared_cache.clone();
+
+        // Each thread gets its own Parser (not Send/Sync)
+        let parsed: Vec<(std::path::PathBuf, ParsedFile)> = uncached_paths
+            .into_par_iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(&path).ok()?;
+                let mtime = std::fs::metadata(&path).ok()?.modified().ok()?;
+
+                let mut parser = tree_sitter::Parser::new();
+                let ts_lang = lang.to_tree_sitter_language();
+                parser.set_language(&ts_lang).ok()?;
+                let tree = parser.parse(&source, None)?;
+
+                // Insert into shared cache if available
+                if let Some(ref cache) = shared {
+                    cache.insert(path.clone(), tree.clone(), source.clone());
+                }
+
+                Some((path, ParsedFile { tree, source, mtime }))
+            })
+            .collect();
+
+        for (path, entry) in parsed {
+            self.local_cache.insert(path, entry);
+        }
+    }
+
     fn get_or_parse(&mut self, path: &Path) -> Option<&ParsedFile> {
         // Check local cache first
         if self.local_cache.contains_key(path) {
@@ -132,7 +189,7 @@ impl AstFilter {
             }
         }
 
-        // Parse from disk
+        // Parse from disk (fallback for single-file requests not going through parse_batch)
         let source = std::fs::read_to_string(path).ok()?;
         let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
         let tree = self.parser.parse(&source, None)?;
@@ -350,5 +407,36 @@ void process_data(int x) {}
         let defs2 = filter2.filter_definitions(&matches);
         assert_eq!(defs2.len(), 1);
         assert_eq!(defs1[0].line, defs2[0].line);
+    }
+
+    #[test]
+    fn test_parallel_parse_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create multiple files to trigger parallel parse path
+        for i in 0..5 {
+            create_cpp_file(
+                &dir,
+                &format!("file{}.cpp", i),
+                &format!("void process_data_{}(int x) {{}}\n", i),
+            );
+        }
+
+        let mut all_matches = Vec::new();
+        for i in 0..5 {
+            let symbol = format!("process_data_{}", i);
+            let matches = crate::searcher::search_symbol(&symbol, dir.path(), &["cpp"]).unwrap();
+            all_matches.extend(matches);
+        }
+
+        assert_eq!(all_matches.len(), 5);
+
+        let mut filter = AstFilter::new(LanguageId::Cpp).unwrap();
+        let defs = filter.filter_definitions(&all_matches);
+        assert_eq!(defs.len(), 5);
+
+        for i in 0..5 {
+            let expected = format!("process_data_{}", i);
+            assert!(defs.iter().any(|d| d.text.contains(&expected)));
+        }
     }
 }

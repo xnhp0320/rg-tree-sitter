@@ -28,8 +28,9 @@ impl SearchEngine {
         Arc::clone(&self.cache)
     }
 
-    /// Mark a file as dirty (its AST should be re-parsed on next use).
+    /// Mark a file as dirty and evict it from cache immediately.
     pub fn mark_dirty(&self, path: PathBuf) {
+        self.cache.remove(&path);
         self.dirty_files.lock().unwrap().insert(path);
     }
 
@@ -41,6 +42,7 @@ impl SearchEngine {
     ) -> anyhow::Result<Vec<SemanticMatch>> {
         let extensions = lang.extensions();
         let matches = search_symbol(symbol, dir, extensions)?;
+        let matches = crate::prefilter::quick_filter(&matches);
         let mut filter = AstFilter::new_with_cache(lang, Some(self.cache()))?;
         Ok(filter.filter_definitions(&matches))
     }
@@ -53,6 +55,7 @@ impl SearchEngine {
     ) -> anyhow::Result<Vec<SemanticMatch>> {
         let extensions = lang.extensions();
         let matches = search_symbol(symbol, dir, extensions)?;
+        let matches = crate::prefilter::quick_filter(&matches);
         let mut filter = AstFilter::new_with_cache(lang, Some(self.cache()))?;
         Ok(filter.filter_references(&matches))
     }

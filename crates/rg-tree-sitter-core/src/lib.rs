@@ -2,6 +2,7 @@ pub mod cache;
 pub mod engine;
 pub mod filter;
 pub mod languages;
+pub mod prefilter;
 pub mod searcher;
 
 pub use filter::{AstFilter, SemanticMatch};
@@ -18,6 +19,7 @@ pub fn find_definitions(
 ) -> anyhow::Result<Vec<SemanticMatch>> {
     let extensions = lang.extensions();
     let matches = searcher::search_symbol(symbol, dir, extensions)?;
+    let matches = prefilter::quick_filter(&matches);
     let mut filter = AstFilter::new(lang)?;
     Ok(filter.filter_definitions(&matches))
 }
@@ -30,6 +32,7 @@ pub fn find_references(
 ) -> anyhow::Result<Vec<SemanticMatch>> {
     let extensions = lang.extensions();
     let matches = searcher::search_symbol(symbol, dir, extensions)?;
+    let matches = prefilter::quick_filter(&matches);
     let mut filter = AstFilter::new(lang)?;
     Ok(filter.filter_references(&matches))
 }
@@ -40,6 +43,7 @@ pub fn filter_definitions_from_input<R: std::io::Read>(
     lang: LanguageId,
 ) -> anyhow::Result<Vec<SemanticMatch>> {
     let matches = searcher::parse_external_matches(input)?;
+    let matches = prefilter::quick_filter(&matches);
     let mut filter = AstFilter::new(lang)?;
     Ok(filter.filter_definitions(&matches))
 }
